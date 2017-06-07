@@ -1,0 +1,793 @@
+---
+title: "Bayou Workshop Notebook"
+output: html_notebook
+---
+Welcome to the SSB 2017 ***bayou*** Workshop!
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. We will begin by loading all the required packages for this tutorial. Please install these ahead of time so that your machine will be ready for the workshop.
+
+```{r}
+
+library(devtools)
+library(geiger)
+library(phytools)
+library(foreach)
+library(doParallel)
+library(treeplyr)
+
+#install_github("uyedaj/bayou", ref = "dev")
+library(bayou)
+
+```
+
+# Simulating a multi-optima OU process on a phylogeny
+
+Let's begin by simulating a multi-optimum Ornstein-Uhlenbeck process on a phylogeny so that we can get a feel for how these models work to model adaptation on phylognies. First let's simulate a tree and rescale it to 100 million years. The second step is optional, but it will help us make sure all our trees and parameters are on a common scale that will probably be typical of the trees you'll analyze. We will also reorder the tree into "postorder" format. **bayou** will automatically reorder the tree to postorder format, but it helps to begin by reordering your tree so that the branch numbers used by **bayou** can be easily matched to the tree. 
+
+```{r}
+
+  tree <- sim.bdtree(b = 1, d = 0, stop = "taxa", n = 50, seed = 1)
+  tree$edge.length <- tree$edge.length/max(branching.times(tree))*100
+  tree <- reorder(tree, "postorder")
+
+  plot(tree, cex = 0.5)
+  
+```
+
+We are now going to simulate an multi-peak OU process on this tree. bayou stores parameter in a parameter list that at a minimum, expects the parameters:
+
+* alpha
+* sig2
+* k
+* ntheta
+* theta
+* sb
+* t2 
+* loc
+
+Let's begin building this list, and then we'll talk about what each of these parameters means. 
+ 
+```{r}
+
+simpars <- list(alpha=1, sig2=1, k=2, ntheta=3, theta=c(0,-1,1))
+
+```
+
+*alpha* and *sig2* are familiar parameters from our OU model, as well as our theta parameters with specify the value of the different regime optima. *k* specifies the numbers of shifts on the phylogeny, and *ntheta* specifies the number of optima. If there are no biologically convergent regimes, then ntheta = k + 1 = length(theta). Note that the root optimum is always the first *theta*, but we must provide locations for the other shifts so **bayou** knows where on the tree these occur. Here we can simply specify which branches (*sb*) and where on those branches (*loc*) we would like our shifts to occur. 
+
+```{r}
+
+shiftlocations <- list(sb = c(94, 71), loc = c(6.23, 6.52))
+
+```
+
+However, knowing where the shifts are is easier visually. So alternatively, we can use the **bayou** function *identifyBranches*, which opens an interactive window for clicking where we want the *k* shifts to occur. (Note: identifyBranches does not work with markdown notebooks, so you will have to copy and paste this function into the R console to run)
+
+```{r eval = FALSE }
+
+shiftlocations <- identifyBranches(tree, simpars$k) ## Copy and paste into the console, run interactively.
+
+```
+
+We now combine the lists to obtain our full parameter list. 
+
+```{r}
+
+simpars <- c(simpars, shiftlocations)
+simpars$t2 <- 2:3
+simpars
+
+```
+
+```{r}
+
+plotBayoupars(simpars, tree)
+
+```
+
+
+The *$sb* element to the list specifies which branches the shifts occur on (assuming the tree is postordered). The length of *$sb*, *$t2* and *$loc* must equal *$k*. The element *$t2* specifies which optimum is shifted to, while *$loc* specifies where on the branch that shift occurs (distance from the node). Now, let's visualize a complete simulation on the tree:
+
+```{r}
+
+plotOUtreesim(simpars, tree)
+abline(h = simpars$theta, col=rainbow(3))
+
+```
+
+#### Questions:
+1. What is phylogenetic signal?
+
+2. Looking at this process, would you say this process has high or low phylogenetic signal? 
+(Hint: Consider only within a single regime. If you take 3 species from the red regime, how much more similar will closely related species be than distantly related species?)
+
+*** 
+
+Modify the parameters to produce more phylogenetic signal.
+
+```{r}
+
+simpars$alpha <- 0.01 #Type one (positive) number
+plotOUtreesim(simpars, tree)
+abline(h = simpars$theta, col=rainbow(3))
+
+```
+
+Hopefully it now looks like that unique evolutionary history sticks around for longer. But what did it do to the separation between regimes? Why? 
+
+Try modifying *sig2* and/or *theta* to restore separation between regimes.
+
+```{r}
+
+simpars$sig2  <-  0.01          #Type one (positive) number
+simpars$theta <- c(0,3, 15)  #Type simpars$ntheta numbers
+
+plotOUtreesim(simpars, tree)
+abline(h=seq(-10, 10, 1), lty=3, lwd=0.5)
+abline(h = simpars$theta, col=rainbow(3))
+
+```
+
+OU models have often come under criticism recently for having flat likelihood ridges and poorly estimated parameters (especially *alpha*). While some of this criticism is valid, it's important to understand **how the parameters affect the model** and especially, that **the parameters in the model have units**. Thus, setting priors on these parameters to be at least plausible can have a large effect on the model fit, and is a critically important step to a **bayou** analysis. 
+
+Brownian Motion, Ornstein-Uhlenbeck models and Early Burst models are Gaussian models. Thus, simply predict the mean and (co)variance of a multivariate normal distribution. We can use some internal functions of **bayou** to visualize how *alpha* affects the expected covariance of an OU/BM model. Let's plot the expected variance-covariance of a Brownian motion model, which is simply the parameter *sigma^2* times the VCV matrix of the tree (the shared branch lengths between tips). Let's assume *sigma^2* is 1 or simplicity. 
+
+```{r}
+
+VCV <- vcv.phylo(tree)
+heatmap(VCV)
+
+```
+
+In an OU model, it's not quite so simple. Instead, the covariance between tips degrades over time proportional to the parameter *alpha*. Eventually, given enough time of independent evolution, the covariance will be 0 and the replicate lineages will equilibrate to a stationary variance (*Vy*) equal to *sigma^2/(2 X alpha)*. 
+
+Using the internal function of bayou called *.ouMatrix*, we can visualize how these parameters affect the expected covariance. 
+
+```{r}
+
+ouV_0.000000001 <- bayou:::.ouMatrix(VCV, alpha = 0.000000001)
+ouV_0.0001 <- bayou:::.ouMatrix(VCV, alpha = 0.0001)
+ouV_0.001 <- bayou:::.ouMatrix(VCV, alpha = 0.001)
+ouV_0.01 <- bayou:::.ouMatrix(VCV,  alpha = 0.01)
+ouV_0.1 <- bayou:::.ouMatrix(VCV,  alpha = 0.1)
+ouV_1.0 <- bayou:::.ouMatrix(VCV,  alpha = 1)
+ouV_10.0 <- bayou:::.ouMatrix(VCV,  alpha = 10)
+ouV_100000000.0 <- bayou:::.ouMatrix(VCV,  alpha = 100000000)
+
+heatmap(ouV_0.000000001)
+heatmap(ouV_0.0001)
+heatmap(ouV_0.001)
+heatmap(ouV_0.01)
+heatmap(ouV_0.1)
+heatmap(ouV_1.0)
+heatmap(ouV_10.0)
+heatmap(ouV_100000000.0)
+
+
+```
+
+Scroll through the different heat maps and see how different alpha values affect the expected covariance among tips. Do you see much difference between *alpha = 0.000000001* and a value 1,000,000 times larger at *alpha = 0.001*? What about between *alpha = 10* and *alpha = 100,000,000*? Look at how *.ouMatrix* transforms the tree. Why are these different values indistinguishable? 
+
+```{r}
+
+bayou:::.ouMatrix
+
+```
+
+So what values if your optimizer is optimizing *alpha*, and all it knows is that it's very large or very small, it will have a really tough time finding the correct value! But ultimately, it doesn't matter much for the predictions of the model. They basically predict the same thing regardless of whether the parameter is large vs. huge (or...tiny vs. miniscule). 
+
+We did see a lot of change between what values? Convert these to phylogenetic half-life and compare to the height of the tree. What do you conclude about the range of *alpha* values that are distinguishable?
+
+###### Challenge question
+
+1. Consider the following scenarios, how would you generate them by changing the parameters of an OU model (if at all)?
+  
+  + Brownian Motion with a trend (i.e. phylogenetic covariance that never goes away, but regimes that slowly and continuously get pulled apart in         different directions.)
+  
+  + White noise with extremely narrow adaptive zones (i.e. very little phylogenetic covariance within regimes, very small stationary variance)
+  
+  + Brownian Motion with sudden jumps (i.e. phylogenetic covariance that never goes away, but sudden shifts)
+  
+  + Lineages very close to their adaptive optima with very large amounts of phylogenetic signal and very narrow adaptive zones.
+
+
+# Using bayou
+
+Now that we have some intuition as to how OU models work, let's simulate some data and use **bayou** to estimate adaptive shifts on phylogenies. Let's first define a set of parameter values to use to simulate our data. 
+
+```{r}
+
+set.seed(1)
+truepars <- list(alpha=0.1, sig2=0.1, 
+                    k=4, ntheta=5, theta=rnorm(5, 0, 4))
+trueshiftlocations <- list(sb = c(94, 71, 45, 12), loc = c(6.9, 2.2, 0.8, 3.9)) # I encourage you to use identifyBranches instead.
+truepars <- c(truepars, trueshiftlocations)
+truepars$t2 <- 2:5
+
+plotBayoupars(truepars, tree, cex = 0.5)
+
+```
+
+Now using the function *dataSim*, we can simulate trait data. 
+
+```{r}
+
+dat <- dataSim(truepars, tree, model="OU")$dat
+
+```
+
+To add realism, let's add some measurement error to the data. This is a good reminder to *always try to use measurement error in your analyses*. OU models especially are affected by measurement error. This is because OU models have the effect of "erasing" evolutionary history with increasing *alpha*. If you don't account for measurement error, then that measurement error will be transferred to the evolutionary process model. You can make a Brownian Motion model look very OU like if there is a lot of measurement error.
+
+```{r}
+
+MEvar <- 0.1
+dat <- dat + rnorm(length(dat), 0, sqrt(MEvar))
+
+```
+
+
+We can now define our prior for our model. The prior function is going to take our parameters and output the *prior probability* of our parameter values. It represents our initial degree of belief in what values the parameters will take. 
+
+```{r}
+
+priorOU <- make.prior(tree, 
+                      dists=list(dalpha="dhalfcauchy", dsig2="dhalfcauchy", 
+                                 dk="cdpois", dtheta="dnorm"),
+                      param=list(dalpha=list(scale=0.1), dsig2=list(scale=0.1),
+                                 dk=list(lambda=10, kmax=50), dsb=list(bmax=1, prob=1), 
+                                 dtheta=list(mean=mean(dat), sd=1.5*sd(dat)))
+)
+
+```
+
+
+*make.prior* tries to be reasonable and not make you type everything out, but **do not be comfortable with defaults**. One trick to make sure your prior functions are reasonable is to simulate a bunch of values and take the quantiles of the distribution. We are using a half-Cauchy distribution for *alpha* and *sig2*, which is a good weakly informative prior for scale parameters. 
+
+Let's see what our choice of half-Cauchy distribution means for our prior on the phylogenetic half-life for the model:
+
+```{r}
+
+quantiles <- c(0, 0.01, 0.025, 0.25, 0.5, 0.75, 0.975, 0.99, 1)
+alfs <- rhalfcauchy(10000, scale = 0.1)
+qs <- quantile(log(2)/alfs, quantiles) ## Use 'alfs' and math to calculate the quantiles of phylogenetic half-life
+round(qs, 2)
+
+```
+
+Remember our tree is 100 million years old. So we're saying that the median value is around 7 million years, and about 75% of the prior density is on a model with fairly short half-lives (< half the tree height). Even so, we are still allowing Brownian Motion-like half-lives (i.e. half-lives longer than the height of the tree).
+
+To run our MCMC, we have to initiate the MCMC chain with some starting values. It's good to run multiple chains from multiple different starting values. Let's simulate some values from the prior distribution and make sure our prior functions works.
+
+```{r}
+
+startpars <- priorSim(priorOU, tree, plot=TRUE)$pars[[1]]
+priorOU(startpars)
+
+```
+
+
+We're now going to take what we have and put it into the function *bayou.makeMCMC*. This function does not immediately initiate the MCMC, but it makes an object that we can use to manage our MCMC analysis. When *bayou* runs an MCMC, it writes the output to a set of files that need to put somewhere. This ensures that the memory doesn't get full of increasingly long chains. Here, I've specified the directory "../output/modelOU/". You'll have to make sure that the directory "../output/" exists for this line to work. 
+
+
+```{r}
+
+set.seed(1)
+mcmcOU <- bayou.makeMCMC(tree, dat, SE=MEvar, prior=priorOU, 
+                         new.dir="../output/modelOU/", outname="modelOU_r001", plot.freq=NULL) # Set up the MCMC
+mcmcOU$run(10000) # Run the MCMC
+
+```
+
+The full MCMC results are written to a set of files. We can load them back in to R as follows.
+
+```{r}
+
+chainOU <- mcmcOU$load()
+
+```
+
+Let's take a look at the results. We can set a "burnin" parameter that tells the package **coda** to discard the first bit of the chain.
+
+```{r}
+
+chainOU <- set.burnin(chainOU, 0.3)
+summary(chainOU)
+plot(chainOU, auto.layout=FALSE)
+
+```
+
+Our traces will probably look bad, 10,000 generations isn't long enough to obtain convergence. Also, note the small effective sample sizes in our summary (the NA's for the *all theta* row are expected, this is because these aren't a single parameter, but a variable number of optima that are coming in and out of existence throughout the chain). 
+
+Let's visualize what we have so far. First, we will plot the truth, then 3 alternative ways of visualizing our chain.
+
+```{r}
+
+par(mfrow=c(2,2))
+plotBayoupars(truepars, tree, main = "True parameters")
+plotSimmap.mcmc(chainOU, burnin = 0.3, pp.cutoff = 0.3)
+plotBranchHeatMap(tree, chainOU, "theta", burnin = 0.3, pal = cm.colors)
+phenogram.density(tree, dat, burnin = 0.3, chainOU, pp.cutoff = 0.3)
+
+```
+
+Even though we haven't gotten convergence yet, we're probably picking up the major shifts pretty well. 
+
+# Alternative parameterizations
+
+Two alternative parameterizations of the OU model are built into **bayou**. First, is a parameterization where priors can be placed directly on phylogenetic half-life (*halflife*) and stationary variance (*Vy*), rather than *alpha* and *sig2*. For example, let's say we want to have a mildly informative prior on the phylogenetic half-life--say a log-normal distribution:
+
+```{r}
+
+par.halflife <- list(meanlog=2.5, sdlog=2.5)
+#Draw a bunch of samples from this distribution:
+samp <- rlnorm(10000, par.halflife$meanlog, par.halflife$sdlog)
+hist(log(samp,10), breaks=100, main="Prior density of halflife")
+abline(v=log(c(1,max(branching.times(tree))),10), col="red", lwd=2, lty=2)
+
+```
+
+Notice that there is about equal density of prior probability on the half-life being greater than tree height (rightmost red line) as there is below 1 million years (leftmost red line). The exact quantiles of this distribution are:
+
+```{r}
+
+qs <- qlnorm(quantiles, meanlog=par.halflife$meanlog, sdlog=par.halflife$sdlog)
+round(setNames(qs, quantiles), 2)
+
+```
+
+##### Challenge question: 
+1. Joe is unsure of what prior to use for *alpha*, and doesn't want it to affect his analysis. He decides he wants to use an uniformative prior, so he uses a uniform distribution on *alpha* from 0 to 100. This allows very small (BM-like) and very large (White noise-like) values for *alpha*. How good a choice did Joe make? (Hint: try randomly generating values and converting to phylogenetic half-life)
+
+Second, we'll set the prior on the stationary variance of the OU process from the Blunderbuss model, as this seems to be the "niche width" we expect to see on million year timescales. We will center it at the estimate from the multiple-burst model from Uyeda et al. 2011. We could make the stationary variance broader than this if we didn't want to interpret the model as the "multiple-burst"
+model from Uyeda et al. 2011. For example, you might set the right tail to be something like 1 or 2 times the width of the entire clade's variance in trait values, and the left tail a few multiples of the population measurement error. This is still a really broad distribution, but even so can constrain the model in ways that often cause Maximum Likelihood based analysis to struggle. 
+
+```{r}
+
+par.Vy <- list(meanlog=log(0.0958), sdlog=0.25)
+hist(rlnorm(10000, par.Vy$meanlog, par.Vy$sdlog), main="Prior density of Vy")
+
+```
+
+Let's make the prior, MCMC object and run the chain. Note that we have specified that *model = "OUrepar"* in *make.prior* and *bayou.makeMCMC*, which means we are using the *halflife*, *Vy* parameterization instead of *sig2* and *alpha*.
+
+```{r}
+
+priorBB <- make.prior(tree, 
+                      dists=list(dhalflife="dlnorm", dVy="dlnorm", 
+                                 dk="cdpois", dsb="dsb", dtheta="dnorm"),
+                      param=list(dhalflife=par.halflife,
+                                 dVy=par.Vy,
+                                 dk=list(lambda=10, kmax=50), dsb=list(bmax=1, prob=1), 
+                                 dtheta=list(mean=mean(dat), sd=1.5*sd(dat))),
+                      model="OUrepar"
+)
+
+
+set.seed(1)
+mcmcBB <- bayou.makeMCMC(tree, dat, SE=MEvar, model="OUrepar", prior=priorBB, new.dir="../output/modelBB/", outname="modelBB_r001", plot.freq=NULL)
+mcmcBB$run(10000)
+
+chainBB <- mcmcBB$load()
+chainBB <- set.burnin(chainBB, 0.3)
+summary(chainBB)
+plot(chainBB)
+
+```
+
+
+```{r}
+
+par(mfrow=c(2,2))
+plotBayoupars(truepars, tree, main = "True parameters")
+plotSimmap.mcmc(chainBB, burnin = 0.3, pp.cutoff = 0.3)
+plotBranchHeatMap(tree, chainBB, "theta", burnin = 0.3, pal = cm.colors)
+phenogram.density(tree, dat, burnin = 0.3, chainBB, pp.cutoff = 0.3)
+
+```
+
+Likely, we will have more shifts because we made the prior on *Vy* so narrow. Let's compare the posteriors from the two models.
+
+```{r}
+
+quantile(chainOU$sig2/(2*chainOU$alpha), quantiles)
+quantile(chainBB$Vy, quantiles)
+
+```
+
+###### Challenge
+For *chainOU* and *chainBB*, plot phylogenetic half-life and stationary variance from the posterior for both of them on the same plot. Give the points different colors. What does the relationships look like? Are they related? Why? Compare to a plot of *alpha* and *sig2* for both. 
+
+```{r}
+plot(log(2)/chainOU$alpha, chainOU$sig2/(2*chainOU$alpha))
+points(chainBB$halflife , chainBB$Vy , pch=21, bg="red")
+```
+
+
+# Quantitative Genetics Model
+We can also fit a model that follows the Quantitative Genetics parameterization. You can check the specified prior distributions on your own, but these are informative priors that specify moderate to high heritability, realistic phenotypic variances, large uncertainty regarding the strength of selection and reasonable effective population sizes for entire species. 
+
+```{r}
+
+par.h2 <- list(shape1=10, shape2=10)
+par.P <- list(meanlog=log(0.12), sdlog=0.2)
+par.w2 <- list(meanlog=log(100), sdlog=2.5)
+par.Ne <- list(meanlog=log(500000), sdlog=2.5)
+
+```
+
+We should rescale the branch lengths to correspond roughly to generation time. However, here we will assume that for
+most of the history of birds and mammals, the generation time has been around 2 year/gen.
+
+```{r}
+
+QGtree <- tree
+QGtree$edge.length <- QGtree$edge.length/2
+
+```
+
+
+```{r}
+
+priorQG <- make.prior(QGtree, plot.prior=FALSE,
+                      dists=list(dh2="dbeta", dP="dlnorm",
+                                 dw2="dlnorm", dNe="dlnorm",
+                                 dk="cdpois", dtheta="dnorm"),
+                      param=list(dh2=par.h2,
+                                 dP=par.P,
+                                 dw2=par.w2,
+                                 dNe=par.Ne,
+                                 dk=list(lambda=10, kmax=50), dsb=list(bmax=1, prob=1), 
+                                 dtheta=list(mean=mean(dat), sd=1.5*sd(dat))),
+                      model="QG"
+)
+
+```
+
+Note that this model has difficulty fitting if the starting point is a poor fit. So rather than drawing from the prior distribution, we will start with shifts chosen by previous analyses:
+
+```{r}
+
+set.seed(1)
+mcmcQG <- bayou.makeMCMC(QGtree, dat, SE=MEvar, model="QG", startpar=NULL, prior=priorQG, new.dir="../output/modelQG/", outname="modelQG_r001", plot.freq=NULL)
+mcmcQG$run(10000)
+
+```
+
+
+```{r}
+
+chainQG <- mcmcQG$load()
+chainQG <- set.burnin(chainQG, 0.3)
+summary(chainQG)
+plot(chainQG, auto.layout=FALSE)
+
+```
+
+```{r}
+
+par(mfrow=c(2,2))
+plotBayoupars(truepars, tree, main = "True parameters")
+plotSimmap.mcmc(chainQG, burnin = 0.3, pp.cutoff = 0.3)
+plotBranchHeatMap(tree, chainQG, "theta", burnin = 0.3, pal = cm.colors)
+phenogram.density(tree, dat, burnin = 0.3, chainQG, pp.cutoff = 0.3)
+
+```
+
+If you kept the seed the same, you should see that there are many more shifts recovered. This is because the QG model predicts such small stationary variances that shifts must occur costantly to explain the variation among species. 
+
+# Model Comparison
+Alternative parameterizations, shift locations, and priors can be compared using Bayes Factors. This requires estimation of the marginal likelihood, which can be difficult. **bayou** uses stepping-stone sampling to estimate the marginal likelihoods. To estimate marginal likelihoods, using the '$steppingstone' function in the mcmc object. For this exercise, we will do a much shorter run than is recommended. If you have multiple cores available on your machine, you can make use of these to run the stepping stone analysis in parallel and conduct the analysis much faster. 
+
+While I have the complete code to do all 3 runs here, I suggest you partner with your neighbor and divide up the computational burden among you. 
+
+```{r}
+
+registerDoParallel(cores=5)
+Bk <- qbeta(seq(0,1, length.out=5), 0.3,1)
+ssOU <- mcmcOU$steppingstone(10000, chainOU, Bk, burnin=0.3, plot=FALSE)
+ssBB <- mcmcBB$steppingstone(10000, chainBB, Bk, burnin=0.3, plot=FALSE)
+ssQG <- mcmcQG$steppingstone(10000, chainQG, Bk, burnin=0.3, plot=FALSE)
+
+mlnL <- c("OU"=ssOU$lnr, "BB"=ssBB$lnr, "QG"=ssQG$lnr)
+mlnL
+
+```
+
+If you get a couple errors it's probably OK, the algorithm takes the posterior and tries to fit various distributions to the parameters, and if it fails to optimize them it will throw an error or two. However, as long as one of them fits OK it will run. Again, we have not run these for long enough or for enough steps (we prefer more like 50!), but you get the idea for how you would proceed. Obviously, having more cores makes this go a LOT faster, and this is a computationally intensive procedure!
+
+```{r}
+
+plot(ssOU)
+plot(ssBB)
+plot(ssQG)
+
+```
+
+##### Challenge:
+1. Wait a minute! Won't a more general model have a higher likelihood than a more restricted model? 
+(Hint: Google *Lindley's Paradox*)
+
+# Fixed models
+While using the reversible-jump MCMC of bayou is useful for exploratory analyses, it is likely that you will also have specific hypotheses regarding adaptive regimes. Like other approaches (OUwie, ouch, etc.) you can implement fixed models in bayou. We will set up two alternative hypotheses. First, we will set a prior with the shift locations fixed to be the true shift locations. Then we will specify an alternative prior with different shift locations. Finally, we will compare the two models using marginal likelihoods estimated using stepping stone sampling. 
+
+```{r}
+
+trueFixedPrior <- make.prior(tree, dists=list(dalpha="dhalfcauchy", dsig2="dhalfcauchy", 
+                                         dk="fixed", dsb="fixed", 
+                                         dtheta="dnorm"),
+                                   param=list(dalpha=list(scale=0.1), dsig2=list(scale=0.1),
+                                        dk="fixed", dsb="fixed", 
+                                        dtheta=list(mean=mean(dat), sd=1.5*sd(dat))),
+                                   fixed =list(k = truepars$k, sb = truepars$sb)
+                             )
+
+```
+
+Choose an alternative arrangement of shift locations. For fun, let's make this one have one extra shift to a convergent regime.
+
+```{r}
+
+altlocations <- list(sb = c(89, 70, 85, 47, 50), loc = c(1.5, 6.6, 5.2, 3.7, 11.1)) # You can also use identifyBranches here
+altpars <- truepars
+altpars$k <- 5
+altpars$sb <- altlocations$sb
+altpars$loc <- altlocations$loc
+altpars$t2 <- c(2, 3, 4, 5, 3) # Shifts on branches 89 and 50 both lead to regime #3
+
+
+alternativeFixedPrior <- make.prior(tree, dists=list(dalpha="dhalfcauchy", dsig2="dhalfcauchy", 
+                                              dk="fixed", dsb="fixed", 
+                                              dtheta="dnorm"),
+                             param=list(dalpha=list(scale=0.1), dsig2=list(scale=0.1),
+                                        dk="fixed", dsb="fixed", 
+                                        dtheta=list(mean=mean(dat), sd=1.5*sd(dat))),
+                             fixed=list(k = 5, ntheta = 5, sb = altpars$sb, loc = altpars$loc, t2 = altpars$t2)
+)
+
+par(mfrow=c(1,2))
+plotBayoupars(truepars, tree, main="True Pars")
+plotBayoupars(altpars, tree, main="Alternative Hypothesis")
+
+```
+
+Run both and load back into bayou. 
+
+```{r}
+
+mcmcFixed1 <- bayou.makeMCMC(tree, dat, SE=MEvar, prior=trueFixedPrior, new.dir="../output/Fixed/", outname="modelTrueFixed_r001", plot.freq=NULL)
+mcmcFixed1$run(10000)
+
+mcmcFixed2 <- bayou.makeMCMC(tree, dat, SE=MEvar, prior=alternativeFixedPrior, new.dir="../output/Fixed/", outname="modelAltFixed_r001", plot.freq=NULL)
+mcmcFixed2$run(10000)
+
+chainFixed1 <- mcmcFixed1$load()
+chainFixed2 <- mcmcFixed2$load()
+
+```
+
+Again, we can estimate marginal likelihoods. Again, I suggest you divide up the tasks with your neighbor.
+
+```{r}
+
+## Run the stepping stone estimation of marginal likelihoods.
+Bk <- qbeta(seq(0,1, length.out=5), 0.3,1)
+ssFixed1 <- mcmcFixed1$steppingstone(10000, chainFixed1, Bk)
+ssFixed2 <- mcmcFixed2$steppingstone(10000, chainFixed2, Bk)
+
+ssFixed1
+ssFixed2
+
+```
+
+
+Most likely, we should see the true model with a much higher marginal likelihood than the alternative parameterization (even though again, these marginal likelihood estimates are likely bad).
+
+***
+
+# Customized/Allometric models
+What if there is a known (or unknown) relationship between the trait of interest and another predictor variable? For example, we may be interested in a relationship between trait known to vary with body size, but consider the possibility that the relationship with body size itself varies over macroevolutionary time. Here, instead of having a single optimum that changes upon a regime shift, it is possible to have both the slope and intercept of the relationship change at once. bayou v2.0 allows you to include these additional predictors and test for shifts in the scaling between a trait and its predictors. 
+
+Let's simulate a dataset where the slope and intercept shift at different points in the tree. We're going to use the same shift 
+locations as before, but add in a covariate with body size that changes in different parts of the tree. We also need to simulate the predictor data, in this case, let's use Brownian Motion.
+
+```{r}
+
+set.seed(1)
+tree <- sim.bdtree(b=1, d=0, stop="taxa", n=50, seed=1)
+tree$edge.length <- tree$edge.length/max(branching.times(tree))*100
+tree <- reorder(tree, "postorder")
+truepars <- list(alpha = 0.5, sig2 = 0.05,
+                 k = 3, ntheta = 4, 
+                 beta_lnMass = c(0.75, 0.6, 0.9, 0.67), 
+                 theta = c(-1, 1.25, 0.5, 0),
+                 sb = c(94, 71, 50),
+                 loc = c(0, 0, 0),
+                 t2 = 2:4)
+
+pred <- cbind("lnMass" = sim.char(tree, 0.2, model="BM", root=3)[,,1])
+phytools::phenogram(tree, setNames(pred[,1], tree$tip.label), spread.labels=FALSE, main="Predictor: Body Size (lnMass)")
+
+dumdat <- dataSim(truepars, "OU", tree)$dat
+cache <- bayou:::.prepare.ou.univariate(tree, dumdat, SE=0, pred=pred)
+W <- bayou:::C_weightmatrix(cache, truepars)
+set.seed(1)
+dat2 <- dataSim(truepars, tree, model="OU")$dat + truepars$beta_lnMass[bayou:::.tipregime(truepars, tree)] * pred[,1]
+set.seed(1)
+dat <- dataSim(truepars, tree, model="OU")$dat + W$W%*%truepars$beta_lnMass * pred[,1]
+dat <- setNames(dat[,1], cache$phy$tip.label)
+set.seed(1)
+trueparsPGLS <- list(alpha=truepars$alpha, sig2=truepars$sig2, k=0, ntheta=1, theta=0, sb=numeric(0), loc=numeric(0), t2=numeric(0))
+dat3 <- dataSim(trueparsPGLS, tree, model="OU")$dat
+dat3 <-truepars$theta[bayou:::.tipregime(truepars, tree)] + truepars$beta_lnMass[bayou:::.tipregime(truepars, tree)] * pred[,1] + dat3
+```
+
+But our old visualization doesn't give the whole picture, because the trait covaries with body size:
+
+```{r}
+
+par(mfrow=c(1,2))
+## Plot the regime locations
+plotRegimes(pars2simmap(truepars,tree)$tr,  col=pars2simmap(truepars,tree)$col)
+## Plot the allometry
+plot(pred[,1], dat, pch=21, bg=bayou:::.tipregime(truepars, tree), xlab="lnMass", "ylab"="Trait")
+## Add the regression lines
+dum <- lapply(1:truepars$ntheta, function(x) abline(truepars$theta[x], truepars$beta_lnMass[x],  lty=2, col=x))
+
+plot(pred[,1], dat2, pch=22, bg=bayou:::.tipregime(truepars, tree), xlab="lnMass", "ylab"="Trait")
+dum <- lapply(1:truepars$ntheta, function(x) abline(truepars$theta[x], truepars$beta_lnMass[x],  lty=2, col=x))
+
+plot(pred[,1], dat3, pch=22, bg=bayou:::.tipregime(truepars, tree), xlab="lnMass", "ylab"="Trait")
+dum <- lapply(1:truepars$ntheta, function(x) abline(truepars$theta[x], truepars$beta_lnMass[x],  lty=2, col=x))
+
+```
+
+We are going to test 3 models in this analysis: Global intercepts & slopes (11), Separate intercepts & global slope (N1), and separate intercepts & slopes (NN). However, we're going to have to build these models to run them (they aren't built into **bayou**). As a convention, we're going to name our regression coefficients (other than the familiar intercept, *theta*) "beta_" followed by the predictor name (e.g. *beta_lnMass*). Here we imagine we have some fairly informative prior belief about what the allometry with body mass should be (normal distribution around 0.7).
+
+
+```{r}
+
+prior.11 <- make.prior(tree, plot.prior = FALSE, 
+                       dists=list(dalpha="dhalfcauchy", dsig2="dhalfcauchy", dbeta_lnMass="dnorm",
+                                  dsb="fixed", dk="fixed", dtheta="dnorm"), 
+                       param=list(dalpha=list(scale=0.1), dsig2=list(scale=0.1),
+                                  dbeta_lnMass=list(mean=0.7, sd=0.2),
+                                  dtheta=list(mean=0, sd=1.5)),
+                       fixed=list(k=0, sb=numeric(0))
+)
+
+prior.N1 <- make.prior(tree, plot.prior = FALSE, 
+                       dists=list(dalpha="dhalfcauchy", dsig2="dhalfcauchy", dbeta_lnMass="dnorm",
+                                  dsb="dsb", dk="cdpois", dtheta="dnorm"), 
+                       param=list(dbeta_lnMass=list(mean=0.7, sd=0.2),
+                                  dk=list(lambda=10, kmax=50),
+                                  dtheta=list(mean=0, sd=1.5))
+)
+
+
+prior.NN <- make.prior(tree, plot.prior = FALSE, 
+                       dists=list(dalpha="dhalfcauchy", dsig2="dhalfcauchy", dbeta_lnMass="dnorm",
+                                  dsb="dsb", dk="cdpois", dtheta="dnorm"), 
+                       param=list(dalpha=list(scale=0.1), dsig2=list(scale=0.1),
+                                  dbeta_lnMass=list(mean=0.7, sd=0.2),
+                                  dk=list(lambda=10, kmax=50), 
+                                  dtheta=list(mean=0, sd=1.5))
+)
+
+```
+
+Manually set tuning parameters, and make the models. There is a bit of art to tuning the parameters, which may require making multiple runs and trying to get the acceptance ratios in the right region (0.2-0.4). But these should work well for these models and data. If the acceptance ratio for a certain parameter is too high, increase the tuning parameter for that variable. If the acceptance ratio is too low, decrease it. The scale of the regression coefficient, for example, should give you some idea of what these parameters should be. 
+
+```{r}
+
+D11 = list(alpha=2, sig2=2, beta_lnMass=0.1, k=1, theta=0.5, slide=1)
+DN1 = list(alpha=2, sig2=2, beta_lnMass=0.1, k=1, theta=2, slide=1)
+DNN = list(alpha=2, sig2=2, beta_lnMass=0.3, k=c(1,1), theta=2, slide=1)
+
+```
+
+Now we use the function *makeBayouModel* to create a **bayou** model object that specifies all the components **bayou** needs to drop a new model into the analysis. Note that if you are interested in developing in **bayou** these are intended to be easy to make for customized models and there is a lot more possible than what is shown here. Note that each model only differs in the number of reversible-jump parameters (0, 1, and 2), the prior and the tuning parameters. By default, the starting regime map is plotted.
+
+```{r}
+MEvar <- 0
+dat <- dat3
+set.seed(1)
+model.11 <- makeBayouModel(dat ~ lnMass, rjpars = c(), 
+                           tree=tree, dat=dat, pred=pred, SE=MEvar, prior=prior.11, D=D11, slopechange="fullPGLS")
+model.N1 <- makeBayouModel(dat ~ lnMass, rjpars = c("theta"),  
+                           tree=tree, dat=dat, pred=pred, SE=MEvar, prior=prior.N1, D=DN1, slopechange="fullPGLS")
+model.NN <- makeBayouModel(dat ~ lnMass, rjpars = c("theta", "lnMass"),  
+                           tree=tree, dat=dat, pred=pred, SE=MEvar, prior=prior.NN, D=DNN, slopechange="fullPGLS")
+
+```
+
+We can now drop these model object into the analysis, along with the generated starting values (replacing the out of the box options of "OU", "OUrepar" and "QG"). 
+
+```{r}
+
+## Make MCMC objects:
+mcmc.11 <- bayou.makeMCMC(tree, dat, pred=pred, SE=MEvar, model=model.11$model, prior=prior.11, startpar=model.11$startpar, new.dir="../output/AllometryTest/", outname="model11_r006", plot.freq=NULL)
+mcmc.N1 <- bayou.makeMCMC(tree, dat, pred=pred, SE=MEvar, model=model.N1$model, prior=prior.N1, startpar=model.N1$startpar, new.dir="../output/AllometryTest/", outname="modelN1_r006", plot.freq=NULL)
+mcmc.NN <- bayou.makeMCMC(tree, dat, pred=pred, SE=MEvar, model=model.NN$model, prior=prior.NN, startpar=model.NN$startpar, new.dir="../output/AllometryTest/", outname="modelNN_r006", plot.freq=NULL)
+
+```
+
+Run the models and load them in.
+
+```{r}
+
+set.seed(1)
+mcmc.11$run(10000)
+mcmc.N1$run(10000)
+mcmc.NN$run(10000)
+
+chain.11 <- set.burnin(mcmc.11$load(), 0.3)
+chain.N1 <- set.burnin(mcmc.N1$load(), 0.3)
+chain.NN <- set.burnin(mcmc.NN$load(), 0.3)
+
+```
+
+A particularly useful way to plot these is to use the *shiftSummaries* and *plotShiftSummaries* functions. Like other plotting functions, we define a posterior probability cutoff and only plot those shifts (*pp.cutoff*). Note that the global allometry (*11*), has no shifts and is not plotted here. 
+
+```{r}
+
+shiftsumsN1 <- shiftSummaries(chain.N1, mcmc.N1, pp.cutoff=0.3, burnin=0.3)
+shiftsumsNN <- shiftSummaries(chain.NN, mcmc.NN, pp.cutoff=0.3, burnin=0.3)
+
+plotShiftSummaries(shiftsumsN1, lwd=2, single.plot=TRUE, label.pts=FALSE)
+plotShiftSummaries(shiftsumsNN, lwd=2, single.plot=TRUE, label.pts=FALSE)
+
+```
+
+As before, we can compare different models by estimating marginal likelihoods. Divide and conquer. 
+
+```{r}
+
+registerDoParallel(cores=5)
+Bk <- qbeta(seq(0,1, length.out=5), 0.3,1)
+set.seed(1)
+ss.11 <- mcmc.11$steppingstone(20000, chain.11, Bk, burnin=0.3, plot=FALSE)
+ss.N1 <- mcmc.N1$steppingstone(20000, chain.N1, Bk, burnin=0.3, plot=FALSE)
+ss.NN <- mcmc.NN$steppingstone(20000, chain.NN, Bk, burnin=0.3, plot=FALSE)
+
+mlnL <- c("11"=ss.11$lnr, "N1"=ss.N1$lnr, "NN"=ss.NN$lnr)
+mlnL
+
+```
+
+# Concluding words
+That's probably way more than we have time for. Thanks for bearing with me. Try applying bayou to your own data, or if you don't have any, here is a script to load in a fun dataset with lots of possibilties. But before you finish, I have a few "words of wisdom" regarding your analyses. 
+
+* **Caveat 1**: The reversible-jump analysis doesn't always work. Sometimes it doesn't converge in a reasonable amount of time, sometimes it doesn't find anything interesting. It's fairly prior sensitive to the number of shifts. Sometimes it's hard to come up with reasonable priors.
+  
+    + Don't put too much stock in the number of shifts recovered. Instead, consider the **number of highly supported shifts**. Consider magnitude. This means you have to understand the units of the parameters. If you get about 20 shifts in your posterior and your prior was about 20 shifts, this doesn't mean you have strong support for 20 shifts. Often, no single branch will have high support, and the shifts will be of negligible magnitude. However, if 5/20 DO have high support, and are of high magnitude these are likely important features to understand in your data!
+  
+    + In general, we found it's better to put higher priors on the number of shifts that fit models more complex than needed, than it is to put a lower prior on the number of shifts that keeps the fit from becoming as complex that as it needs to be. If the prior disallows the number of shifts it needs to explain the data, often the model will collapse to a BM like model. When this happens, the number of shifts and the value of theta doesn't really matter anymore, they don't affect anything in the model, and the model is unlikely to find the true posterior (even the *true* arrangement of shifts doesn't really affect the likelihood when *alpha* is stuck in the land of Brownian Motion.) It can be useful to try many starting points, or even start with an overfitted model and let *bayou* drop shifts rather than add them. 
+  
+    + Don't be afraid to use informative priors. Even very weakly informative priors. For example, if you're studying mammal body size, can you rule out animals larger than earth? Smaller than an atom? Your prior should reflect this! You'd be surprised how often priors we use, or estimates from ML optimizations, result in parameters in these ranges. 
+  
+    + Think in terms of phylogenetic half-life and stationary variance. It's more intuitive. 
+  
+* **Caveat 2**: The reversible-jump approach is data snooping. Plus, it's hard to summarize, it's hard to conceptualize, and it's complicated. 
+
+    + I like to take the following strategy in my analyses. I view the reversible-jump approach as an exploratory, natural history based approach for understanding the *major features* of my data. I want to know which groups are unique and doing something different because we don't see in *phylogenetic time*, we see only extant species and our view of the evolutionary pattern is warped by the phylogeny. rjMCMC is a *tool to see the pattern of evolution through phylogenetic time*. 
+  
+    + Once you identify the major features of your data, it's reasonable to ask **why?** Compare different a priori or fixed hypotheses using Bayes Factors. Find the best one as you would normally in model selection. However, if that model fails to explain those *major features* of your data, you have more work to do to find a better model. 
+  
+    + A useful approach is to compare a model with the shifts found in your reversible-jump analysis to a model without shifts, but with an explanatory predictor added. Essentially, you ask *is the data better explained by clade-level shifts (with many parameters) or a single or handful of predictor variables?* Can you *explain away* clade-level shifts with predictors? Can I *explain away* several clade-specific shifts to higher regimes in whales, pinnipeds and Sirenia by including the predictor *aquatic* into my analysis?
+  
+* **Caveat 3**: **bayou** is not the best OU tool for every situation. **bayou** is cool because it's Bayesian. OU models are cool because they are supposed to represent biologically realistic processes of adaptation. So the parameters mean something biological. So the parameters have prior expectations. Also, **bayou** is useful for exploring and understanding your data. However:
+
+      + Right now, **bayou** doesn't fit OUwie-type models effectively. If you have questions about changing dynamics of regimes (changing *alpha* or *sig2*), such as a hypothesis that one clade is more constrained than another -- use OUwie. 
+  
+      + There can be identifiability issues with **bayou**. You can imagine that the a similar set of shifts can result in the same distribution of data. If multiple shifts occur on a branch, for example. Or if two shifts occur on neighboring branches. There are many configurations that can lead to identical or nearly identical likelihoods and mixing can be difficult. Run multiple chains. If they each get stuck with alternative, but similar configurations of shifts with poor mixing, you will know that identifiability is an issue. Likelihood-based tools such as **l1ou** have implemented approaches for dealing with this issue that hopefully will soon be implemented in **bayou** as well. 
+  
+      + The packages **slouch** and **mvSLOUCH** implement a full suite of "evolutionarily-aware" regression approaches that are likely more better than the approaches I have outlined here. They don't find shifts, you have to assume them, and the can be difficult to use...but in most cases the models are more evolutionarily reasonable. These are sorely underused packages. They solve a problem with PGLS that most people don't even realize is there. In **bayou**'s simple allometric models, the value of a predictor (e.g. body size) immediately effects the trait. This is a lot like PGLS and reasonable if the two traits are mechanistically or developmentally linked (body mass automatically increases as you grow longer). But this isn't true for a trait like *precipitation*. How much it rained this year isn't going to be a perfect predictor of body mass, though body mass may respond to precipitation. But it doesn't respond quickly. Instead, it responds to a moving average of precipitation. You can't predict "optimal" body mass for a lineage from current conditions, you need the whole history of precipitation conditions to model where the optima was in the past, as well as today. This means you need to model the evolutionary history of precipitation for a lineage as well as the evolutionary history of body mass. You need **slouch** to do this. (Again, hopefully these models will soon be in **bayou** too)
+  
+      + **bayou** is not truly multivariate. Better packages for fitting multivariate OU models include **mvSLOUCH**, **mvMORPH** and **ouch**. This will also hopefully change in the future.  
+
+
+
+
+
