@@ -2,7 +2,7 @@
 title: "Bayou Workshop Notebook"
 output: html_notebook
 ---
-Welcome to the SSB 2017 ***bayou*** Workshop!
+Welcome to the EQG 2017 ***bayou*** tutorial!
 
 This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
 
@@ -109,7 +109,7 @@ Modify the parameters to produce more phylogenetic signal.
 
 ```{r}
 
-simpars$alpha <- 0.01 #Type one (positive) number
+simpars$alpha <- ? #Type one (positive) number
 plotOUtreesim(simpars, tree)
 abline(h = simpars$theta, col=rainbow(3))
 
@@ -121,8 +121,8 @@ Try modifying *sig2* and/or *theta* to restore separation between regimes.
 
 ```{r}
 
-simpars$sig2  <-  0.01          #Type one (positive) number
-simpars$theta <- c(0,3, 15)  #Type simpars$ntheta numbers
+simpars$sig2  <-  ?       #Type one (positive) number
+simpars$theta <- ? #Type simpars$ntheta numbers
 
 plotOUtreesim(simpars, tree)
 abline(h=seq(-10, 10, 1), lty=3, lwd=0.5)
